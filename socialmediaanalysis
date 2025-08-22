@@ -1,0 +1,124 @@
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+import streamlit as st
+from wordcloud import WordCloud
+from textblob import TextBlob
+from collections import Counter
+from dotenv import load_dotenv
+from googleapiclient.discovery import build
+load_dotenv()
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+def get_trending_videos(region="IN", max_results=5):
+    if not YOUTUBE_API_KEY:
+        st.error("⚠️ YouTube API Key not found in .env file!")
+        return pd.DataFrame()
+    try:
+        youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+        request = youtube.videos().list(
+            part="snippet,statistics",
+            chart="mostPopular",
+            regionCode=region,
+            maxResults=max_results
+        )
+        response = request.execute()
+        if "items" not in response:
+            st.warning("⚠️ No videos found (API quota or region issue).")
+            return pd.DataFrame()
+
+        videos = []
+        for item in response["items"]:
+            videos.append({
+                "Title": item["snippet"]["title"],
+                "Channel": item["snippet"]["channelTitle"],
+                "Views": int(item["statistics"].get("viewCount", 0))
+            })
+        return pd.DataFrame(videos)
+    except Exception as e:
+        st.error(f"Error fetching YouTube data: {e}")
+        return pd.DataFrame()
+def analyze_twitter_dataset(df, text_column="text"):
+    df = df.dropna(subset=[text_column])
+    df[text_column] = df[text_column].astype(str)
+    words = " ".join(df[text_column]).lower().split()
+    word_counts = Counter(words)
+    df["Polarity"] = df[text_column].map(lambda x: TextBlob(x).sentiment.polarity)
+    def label_sentiment(p):
+        if p > 0:
+            return "Positive"
+        elif p < 0:
+            return "Negative"
+        else:
+            return "Neutral"
+    df["Sentiment"] = df["Polarity"].map(label_sentiment)
+    return df, word_counts
+st.set_page_config(page_title="YouTube + Twitter Analysis", layout="wide")
+st.title("📊 Social Media Trend Analysis")
+st.write("Analyze **YouTube trending videos** + **Twitter dataset (CSV)**")
+st.header("🔥 YouTube Trending Videos")
+region = st.selectbox("Select Region", ["IN", "US", "GB", "CA", "AU"])
+max_videos = st.slider("Number of videos", 1, 10, 5)
+if st.button("Fetch YouTube Trending"):
+    with st.spinner("Fetching data from YouTube..."):
+        yt_df = get_trending_videos(region=region, max_results=max_videos)
+        if not yt_df.empty:
+            st.dataframe(yt_df)
+            st.subheader("📊 Views Chart")
+            st.bar_chart(yt_df.set_index("Title")["Views"])
+st.header("🐦 Twitter Dataset Analysis")
+uploaded_file = st.file_uploader("Upload a CSV file with tweets", type=["csv"])
+if uploaded_file:
+    df = pd.read_csv(uploaded_file)
+    st.write("📄 Dataset Preview:", df.head())
+    if "text" not in df.columns:
+        st.error("CSV must contain a 'text' column with tweets!")
+    else:
+        df, word_counts = analyze_twitter_dataset(df, text_column="text")
+        st.subheader("Filter Sentiments to Display")
+        show_positive = st.checkbox("Positive", True)
+        show_negative = st.checkbox("Negative", True)
+        show_neutral = st.checkbox("Neutral", True)
+        selected_sentiments = []
+        if show_positive: selected_sentiments.append("Positive")
+        if show_negative: selected_sentiments.append("Negative")
+        if show_neutral: selected_sentiments.append("Neutral")
+        if not selected_sentiments:
+            st.warning("Please select at least one sentiment to analyze!")
+        else:
+            filtered_df = df[df["Sentiment"].isin(selected_sentiments)]
+            st.subheader("Sentiment Distribution (Bar Chart with %)")
+            sentiment_summary = filtered_df["Sentiment"].value_counts(normalize=True) * 100  
+            fig, ax = plt.subplots()
+            colors = {"Positive": "green", "Negative": "red", "Neutral": "gray"}
+            bars = ax.bar(sentiment_summary.index, sentiment_summary.values, 
+                          color=[colors[s] for s in sentiment_summary.index])
+            ax.set_ylabel("Percentage (%)")
+            ax.set_title("Sentiment Distribution")
+            for bar, pct in zip(bars, sentiment_summary.values):
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                        f"{pct:.1f}%", ha="center", va="bottom", fontsize=10, fontweight="bold")
+            st.pyplot(fig)
+            st.subheader("Sentiment Breakdown (Pie Chart)")
+            sentiment_counts = filtered_df["Sentiment"].value_counts()
+            fig, ax = plt.subplots()
+            ax.pie(
+                sentiment_counts,
+                labels=sentiment_counts.index,
+                autopct="%1.1f%%",
+                startangle=90,
+                colors=[colors[label] for label in sentiment_counts.index]
+            )
+            ax.axis("equal")
+            st.pyplot(fig)
+            st.subheader("WordCloud (Filtered by Sentiment)")
+            text = " ".join(filtered_df["text"])
+            wc = WordCloud(width=800, height=400, background_color="white").generate(text)
+            fig, ax = plt.subplots(figsize=(10, 5))
+            ax.imshow(wc, interpolation="bilinear")
+            ax.axis("off")
+            st.pyplot(fig)
+            st.subheader("🔝 Top 10 Frequent Words (Filtered)")
+            words_filtered = " ".join(filtered_df["text"]).lower().split()
+            word_counts_filtered = Counter(words_filtered)
+            freq_df = pd.DataFrame(word_counts_filtered.most_common(10), columns=["Word", "Count"])
+            st.table(freq_df)
