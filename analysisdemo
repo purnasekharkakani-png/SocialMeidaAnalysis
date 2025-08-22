@@ -1,0 +1,253 @@
+# -*- coding: utf-8 -*-
+"""
+Social Media Trend Analysis Web App
+CSV Upload + YouTube (Trending + Custom Video) + Twitter Hashtag
+NLTK + TextBlob + Visualization + Streamlit
+"""
+
+import pandas as pd
+import nltk
+import matplotlib.pyplot as plt
+from wordcloud import WordCloud
+from textblob import TextBlob
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from collections import Counter
+import streamlit as st
+from googleapiclient.discovery import build
+import re
+import tweepy
+
+# Download NLTK resources (first time only)
+nltk.download("punkt")
+nltk.download("stopwords")
+
+# -------------------------------
+# API Setup
+# -------------------------------
+# YouTube API
+YOUTUBE_API_KEY = "YOUR_YOUTUBE_API_KEY"  # 🔑 Replace with your YouTube API Key
+youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+
+# Twitter API
+TW_CONSUMER_KEY = "YOUR_TWITTER_CONSUMER_KEY"      # 🔑 Replace
+TW_CONSUMER_SECRET = "YOUR_TWITTER_CONSUMER_SECRET"
+TW_ACCESS_TOKEN = "YOUR_TWITTER_ACCESS_TOKEN"
+TW_ACCESS_SECRET = "YOUR_TWITTER_ACCESS_SECRET"
+
+auth = tweepy.OAuth1UserHandler(
+    TW_CONSUMER_KEY, TW_CONSUMER_SECRET,
+    TW_ACCESS_TOKEN, TW_ACCESS_SECRET
+)
+twitter_api = tweepy.API(auth)
+
+# -------------------------------
+# Helper Functions
+# -------------------------------
+def clean_text(text):
+    text = str(text).lower()
+    words = word_tokenize(text)
+    stop_words = set(stopwords.words("english"))
+    filtered = [w for w in words if w.isalpha() and w not in stop_words]
+    return " ".join(filtered)
+
+def get_sentiment(text):
+    analysis = TextBlob(text)
+    if analysis.sentiment.polarity > 0:
+        return "Positive"
+    elif analysis.sentiment.polarity == 0:
+        return "Neutral"
+    else:
+        return "Negative"
+
+def analyze_data(data, title="Analysis Results"):
+    st.subheader(f"📊 {title}")
+
+    # Clean + Sentiment
+    data["clean_text"] = data["text"].apply(clean_text)
+    data["Sentiment"] = data["clean_text"].apply(get_sentiment)
+
+    # Sentiment Summary
+    total = len(data)
+    counts = data["Sentiment"].value_counts(normalize=True) * 100
+    st.info(f"✅ Sentiment Summary: "
+            f"😊 Positive: {counts.get('Positive',0):.1f}% | "
+            f"😐 Neutral: {counts.get('Neutral',0):.1f}% | "
+            f"😡 Negative: {counts.get('Negative',0):.1f}%")
+
+    # Sentiment Distribution
+    st.subheader("📈 Sentiment Distribution")
+    sentiment_counts = data["Sentiment"].value_counts()
+    st.bar_chart(sentiment_counts)
+
+    fig, ax = plt.subplots()
+    sentiment_counts.plot(kind="pie", autopct="%1.1f%%",
+                          colors=["green", "blue", "red"], ax=ax)
+    ax.set_ylabel("")
+    ax.set_title("Sentiment Distribution (Pie)")
+    st.pyplot(fig)
+
+    # Word Cloud
+    st.subheader("☁️ Word Cloud")
+    all_words = " ".join(data["clean_text"])
+    if all_words.strip():
+        wordcloud = WordCloud(width=800, height=400, background_color="white").generate(all_words)
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.imshow(wordcloud, interpolation="bilinear")
+        ax.axis("off")
+        st.pyplot(fig)
+
+    # Top 10 Frequent Words
+    st.subheader("🔝 Top 10 Frequent Words")
+    all_tokens = " ".join(data["clean_text"]).split()
+    freq = Counter(all_tokens).most_common(10)
+    if freq:
+        words, counts = zip(*freq)
+        fig, ax = plt.subplots()
+        ax.bar(words, counts, color="skyblue")
+        plt.xticks(rotation=45)
+        ax.set_title("Top 10 Frequent Words")
+        st.pyplot(fig)
+        st.write(freq)
+
+    # Download
+    st.subheader("📥 Download Analyzed Data")
+    st.download_button(
+        label="Download CSV",
+        data=data.to_csv(index=False).encode("utf-8"),
+        file_name="analyzed_comments.csv",
+        mime="text/csv",
+    )
+
+# -------------------------------
+# YouTube Functions
+# -------------------------------
+def get_trending_videos(region="IN", max_results=5):
+    request = youtube.videos().list(
+        part="snippet,statistics",
+        chart="mostPopular",
+        regionCode=region,
+        maxResults=max_results
+    )
+    response = request.execute()
+
+    videos = []
+    for item in response["items"]:
+        videos.append({
+            "id": item["id"],
+            "title": item["snippet"]["title"],
+            "thumbnail": item["snippet"]["thumbnails"]["high"]["url"],
+            "url": f"https://www.youtube.com/watch?v={item['id']}",
+            "views": int(item["statistics"].get("viewCount", 0)),
+            "likes": item["statistics"].get("likeCount", "N/A"),
+            "comments": int(item["statistics"].get("commentCount", 0)),
+        })
+    return videos
+
+def get_video_comments(video_id, max_results=100):
+    comments = []
+    request = youtube.commentThreads().list(
+        part="snippet",
+        videoId=video_id,
+        maxResults=min(max_results, 100),
+        textFormat="plainText"
+    )
+    response = request.execute()
+
+    for item in response["items"]:
+        comment = item["snippet"]["topLevelComment"]["snippet"]["textDisplay"]
+        comments.append(comment)
+    return comments
+
+def extract_video_id(url):
+    """Extracts YouTube video ID from URL"""
+    pattern = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
+    match = re.search(pattern, url)
+    return match.group(1) if match else None
+
+# -------------------------------
+# Twitter Functions
+# -------------------------------
+def get_twitter_data(query, count=100):
+    tweets = tweepy.Cursor(twitter_api.search_tweets,
+                           q=query, lang="en",
+                           tweet_mode="extended").items(count)
+    tweet_texts = [tweet.full_text for tweet in tweets]
+    return tweet_texts
+
+# -------------------------------
+# Streamlit UI
+# -------------------------------
+st.title("📊 Social Media Trend Analysis")
+st.write("Analyze comments/posts from **CSV, YouTube, or Twitter**")
+
+menu = st.sidebar.radio("Choose Analysis Type", 
+                        ["📂 CSV Upload", "🔥 YouTube Trending", "🎥 YouTube Video URL", "🐦 Twitter Hashtag/Keyword"])
+
+# --- CSV Upload ---
+if menu == "📂 CSV Upload":
+    uploaded_file = st.file_uploader("📂 Upload your CSV file", type=["csv"])
+    if uploaded_file:
+        data = pd.read_csv(uploaded_file)
+        if "text" not in data.columns:
+            st.error("❌ CSV must have a column named 'text'")
+        else:
+            st.success("✅ File uploaded successfully!")
+            st.write(data.head())
+            analyze_data(data, "CSV File Analysis")
+
+# --- YouTube Trending ---
+elif menu == "🔥 YouTube Trending":
+    region = st.text_input("Enter region code (default IN for India):", "IN")
+    max_videos = st.selectbox("How many trending videos to show?", [5, 10, 20], index=0)
+
+    videos = get_trending_videos(region=region, max_results=max_videos)
+
+    st.subheader("🔥 Trending Videos")
+    for v in videos:
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            st.image(v["thumbnail"], use_container_width=True)
+        with col2:
+            st.markdown(f"**[{v['title']}]({v['url']})**")
+            st.write(f"👀 Views: {v['views']:,}")
+            st.write(f"👍 Likes: {v['likes']}")
+            st.write(f"💬 Comments: {v['comments']:,}")
+
+        if st.button(f"Analyze {v['title']}", key=v["id"]):
+            comments = get_video_comments(v["id"], max_results=200)
+            st.success(f"✅ Fetched {len(comments)} comments from YouTube")
+
+            yt_data = pd.DataFrame(comments, columns=["text"])
+            analyze_data(yt_data, f"YouTube - {v['title']}")
+
+# --- Any YouTube Video ---
+elif menu == "🎥 YouTube Video URL":
+    video_url = st.text_input("Paste YouTube Video URL here:")
+    if video_url:
+        video_id = extract_video_id(video_url)
+        if video_id:
+            if st.button("Fetch & Analyze Comments"):
+                comments = get_video_comments(video_id, max_results=200)
+                if comments:
+                    st.success(f"✅ Fetched {len(comments)} comments")
+                    yt_data = pd.DataFrame(comments, columns=["text"])
+                    analyze_data(yt_data, "Custom YouTube Video Analysis")
+                else:
+                    st.warning("⚠️ No comments found or video is restricted")
+        else:
+            st.error("❌ Invalid YouTube URL")
+
+#
+elif menu == "🐦 Twitter Hashtag/Keyword":
+    query = st.text_input("Enter Twitter Hashtag or Keyword (e.g. #AI, OpenAI):")
+    tweet_count = st.slider("Number of Tweets to Fetch", 50, 500, 100)
+
+    if query and st.button("Fetch & Analyze Tweets"):
+        tweets = get_twitter_data(query, count=tweet_count)
+        if tweets:
+            st.success(f"✅ Fetched {len(tweets)} tweets")
+            tw_data = pd.DataFrame(tweets, columns=["text"])
+            analyze_data(tw_data, f"Twitter - {query}")
+        else:
+            st.warning("⚠️ No tweets found for this query")
